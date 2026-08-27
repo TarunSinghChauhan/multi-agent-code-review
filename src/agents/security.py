@@ -6,6 +6,15 @@ from src.agents.state import PRState, CodeIssue
 from src.core.config import get_settings
 from src.core.logging import get_logger
 
+
+def strip_json_fence(raw: str) -> str:
+    """Strip a markdown code fence (```json or plain ```) from an LLM response, if present."""
+    if "```json" in raw:
+        return raw.split("```json")[1].split("```")[0].strip()
+    elif "```" in raw:
+        return raw.split("```")[1].split("```")[0].strip()
+    return raw
+
 settings = get_settings()
 logger = get_logger(__name__)
 
@@ -194,10 +203,7 @@ Return [] if no additional security issues found beyond obvious ones."""
         )
 
         raw = response.choices[0].message.content or "[]"
-        if "```json" in raw:
-            raw = raw.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw:
-            raw = raw.split("```")[1].split("```")[0].strip()
+        raw = strip_json_fence(raw)
 
         llm_issues = json.loads(raw)
         for issue in llm_issues:
