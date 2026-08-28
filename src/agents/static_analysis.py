@@ -5,6 +5,7 @@ from openai import AsyncOpenAI
 from src.agents.state import PRState, CodeIssue
 from src.core.config import get_settings
 from src.core.logging import get_logger
+from src.agents.security import strip_json_fence
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -148,10 +149,7 @@ Return empty array [] if no issues found."""
         )
 
         raw = response.choices[0].message.content or "[]"
-        if "```json" in raw:
-            raw = raw.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw:
-            raw = raw.split("```")[1].split("```")[0].strip()
+        raw = strip_json_fence(raw)
 
         llm_issues = json.loads(raw)
         for issue in llm_issues:
