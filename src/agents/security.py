@@ -7,6 +7,11 @@ from src.core.config import get_settings
 from src.core.logging import get_logger
 
 
+def calculate_llm_cost(prompt_tokens: int, completion_tokens: int) -> float:
+    """Cost in USD for gpt-4o-mini pricing: $0.15/1M input, $0.60/1M output tokens."""
+    return (prompt_tokens * 0.15 + completion_tokens * 0.60) / 1_000_000
+
+
 def strip_json_fence(raw: str) -> str:
     """Strip a markdown code fence (```json or plain ```) from an LLM response, if present."""
     if "```json" in raw:
@@ -218,7 +223,7 @@ Return [] if no additional security issues found beyond obvious ones."""
             ))
 
         if response.usage:
-            cost = (response.usage.prompt_tokens * 0.15 + response.usage.completion_tokens * 0.60) / 1_000_000
+            cost = calculate_llm_cost(response.usage.prompt_tokens, response.usage.completion_tokens)
 
     except Exception as e:
         logger.error("security_agent_llm_failed", error=str(e))
