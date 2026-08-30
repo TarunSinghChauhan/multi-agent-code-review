@@ -5,7 +5,7 @@ from openai import AsyncOpenAI
 from src.agents.state import PRState, CodeIssue
 from src.core.config import get_settings
 from src.core.logging import get_logger
-from src.agents.security import strip_json_fence
+from src.agents.security import calculate_llm_cost, strip_json_fence
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -164,7 +164,7 @@ Return empty array [] if no issues found."""
             ))
 
         if response.usage:
-            cost = (response.usage.prompt_tokens * 0.15 + response.usage.completion_tokens * 0.60) / 1_000_000
+            cost = calculate_llm_cost(response.usage.prompt_tokens, response.usage.completion_tokens)
 
     except Exception as e:
         logger.error("static_analysis_llm_failed", error=str(e))
