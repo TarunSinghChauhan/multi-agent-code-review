@@ -101,3 +101,25 @@ def test_merger_marks_completed_true():
     state = make_state([])
     result = merger_agent(state)
     assert result["completed"] is True
+
+
+def test_merger_summary_caps_at_5_issues_per_agent():
+    issues = [
+        make_issue("security", f"issue_type_{i}", "high", line_number=i, title=f"Issue {i}")
+        for i in range(8)
+    ]
+    state = make_state(issues)
+    result = merger_agent(state)
+    summary = result["review_summary"]
+    listed_lines = [line for line in summary.split("\n") if line.startswith("- [HIGH]")]
+    assert len(listed_lines) == 5
+
+
+def test_merger_summary_shows_full_count_even_when_capped():
+    issues = [
+        make_issue("security", f"issue_type_{i}", "high", line_number=i, title=f"Issue {i}")
+        for i in range(8)
+    ]
+    state = make_state(issues)
+    result = merger_agent(state)
+    assert "(8 issues)" in result["review_summary"]
