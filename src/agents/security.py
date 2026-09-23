@@ -23,10 +23,22 @@ def strip_json_fence(raw: str) -> str:
 settings = get_settings()
 logger = get_logger(__name__)
 
-client = AsyncOpenAI(
-    api_key=settings.openrouter_api_key,
-    base_url="https://openrouter.ai/api/v1",
-)
+_client: AsyncOpenAI | None = None
+
+
+def _get_client() -> AsyncOpenAI:
+    """Lazily construct the OpenAI client on first use, not at import time.
+    This lets the module (and anything that imports its pure functions,
+    like calculate_llm_cost or strip_json_fence) be imported safely even
+    when no API key is configured yet — e.g. in tests or tooling that
+    only needs the non-LLM helpers."""
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(
+            api_key=settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+    return _client
 
 # ─── Pattern-based security checks (free, no API) ─────────────────────────────
 SECURITY_PATTERNS = [
@@ -196,7 +208,7 @@ Respond ONLY with valid JSON array:
 
 Return [] if no additional security issues found beyond obvious ones."""
 
-        response = await client.chat.completions.create(
+        response = await _get_client().chat.completions.create(
             model="openai/gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are an expert security engineer specializing in code security audits. Respond only with valid JSON."},
