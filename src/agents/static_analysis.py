@@ -10,10 +10,19 @@ from src.agents.security import calculate_llm_cost, strip_json_fence
 settings = get_settings()
 logger = get_logger(__name__)
 
-client = AsyncOpenAI(
-    api_key=settings.openrouter_api_key,
-    base_url="https://openrouter.ai/api/v1",
-)
+_client: AsyncOpenAI | None = None
+
+
+def _get_client() -> AsyncOpenAI:
+    """Lazily construct the OpenAI client on first use, not at import time
+    (see src/agents/security.py for the same pattern and rationale)."""
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(
+            api_key=settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+    return _client
 
 
 def _analyze_python_ast(code: str) -> list[dict]:
@@ -137,7 +146,7 @@ Respond ONLY with valid JSON array:
 
 Return empty array [] if no issues found."""
 
-        response = await client.chat.completions.create(
+        response = await _get_client().chat.completions.create(
             model="openai/gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are an expert code reviewer. Respond only with valid JSON."},
