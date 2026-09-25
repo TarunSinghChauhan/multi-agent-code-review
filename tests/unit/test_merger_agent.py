@@ -123,3 +123,55 @@ def test_merger_summary_shows_full_count_even_when_capped():
     state = make_state(issues)
     result = merger_agent(state)
     assert "(8 issues)" in result["review_summary"]
+
+
+from src.agents.state import FixProposal
+
+
+def make_fix(issue_title="Fix eval usage", original_code="eval(x)", fixed_code="ast.literal_eval(x)", explanation="Use ast.literal_eval instead"):
+    return FixProposal(
+        issue_title=issue_title,
+        original_code=original_code,
+        fixed_code=fixed_code,
+        explanation=explanation,
+    )
+
+
+def test_merger_verdict_minor_when_only_low_or_medium_issues():
+    issues = [make_issue("static_analysis", "style", "low")]
+    state = make_state(issues)
+    result = merger_agent(state)
+    assert "MINOR ISSUES" in result["review_summary"]
+    assert "Consider fixing before merge" in result["review_summary"]
+
+
+def test_merger_includes_fix_proposals_section_when_present():
+    issues = [make_issue("security", "eval_usage", "high")]
+    fixes = [make_fix()]
+    state = make_state(issues, fix_proposals=fixes)
+    result = merger_agent(state)
+    assert "Fix Proposals (1 generated)" in result["review_summary"]
+    assert "Fix eval usage" in result["review_summary"]
+    assert "Use ast.literal_eval instead" in result["review_summary"]
+
+
+def test_merger_omits_fix_proposals_section_when_none_present():
+    issues = [make_issue("security", "eval_usage", "high")]
+    state = make_state(issues, fix_proposals=[])
+    result = merger_agent(state)
+    assert "Fix Proposals" not in result["review_summary"]
+
+
+def test_merger_issue_line_ref_omitted_when_line_number_is_none():
+    issue = CodeIssue(
+        agent="security",
+        issue_type="general",
+        severity="high",
+        line_number=None,
+        title="General issue",
+        description="desc",
+    )
+    state = make_state([issue])
+    result = merger_agent(state)
+    assert "(line" not in result["review_summary"]
+    assert "General issue" in result["review_summary"]
