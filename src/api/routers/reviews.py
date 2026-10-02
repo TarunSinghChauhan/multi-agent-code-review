@@ -3,7 +3,7 @@ import math
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.agents.orchestrator import CodeReviewOrchestrator
 from src.core.logging import get_logger
@@ -45,7 +45,7 @@ def serialize_result(final_state: dict) -> dict:
         "job_id": final_state.get("job_id"),
         "filename": final_state.get("filename"),
         "language": final_state.get("language"),
-        "completed_at": datetime.utcnow().isoformat(),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
         "total_issues": len(issues),
         "severity_counts": final_state.get("severity_counts", {}),
         "total_cost_usd": round(final_state.get("total_cost_usd", 0.0), 6),
