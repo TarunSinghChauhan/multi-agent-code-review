@@ -116,7 +116,10 @@ async def static_analysis_agent(state: PRState) -> dict:
             ))
 
     # ── 2. LLM code quality analysis ─────────────────────────────────────────
-    try:
+       try:
+        if not settings.llm_enabled:
+            logger.info("static_llm_skipped", job_id=state["job_id"])
+            return {"issues": issues, "total_cost_usd": state["total_cost_usd"]}
         prompt = f"""Analyze this {state['language']} code for quality issues.
 
 Code from file: {state['filename']}
