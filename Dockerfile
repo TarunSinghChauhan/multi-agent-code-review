@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pydantic-settings \
     sqlmodel \
     asyncpg \
+    greenlet \
     redis \
     openai \
     langgraph \
