@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-Agent Code Review</title>
+<style>
+  :root{--bg:#0f1117;--card:#181b24;--border:#262b38;--text:#e6e8ee;--muted:#8a91a5;--accent:#7c8cff;--ok:#3ecf8e;--bad:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0 auto;padding:24px;max-width:1100px;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  h1{font-size:22px;margin:0 0 4px} h2{font-size:16px;margin:24px 0 10px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  .muted{color:var(--muted);font-size:12px;margin-top:6px}
+  textarea{width:100%;height:200px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;resize:vertical}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:10px 14px;font-size:14px;cursor:pointer}
+  button.secondary{background:#2a2f3f}
+  button:disabled{opacity:.6;cursor:wait}
+  #status{min-height:20px;font-size:14px;margin:6px 0}
+  #status.err{color:var(--bad)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px}
+  .card .label{color:var(--muted);font-size:12px;text-transform:capitalize}
+  .card .value{font-size:22px;font-weight:600}
+  .scroll{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:500}
+  .badge{padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;text-transform:uppercase;color:#111}
+  .critical{background:#ff5d5d}.high{background:#ff9f5a}.medium{background:#f3d36b}.low{background:#6bc7f3}.info{background:#8a91a5}
+  pre{background:#11131a;border:1px solid var(--border);border-radius:8px;padding:10px;overflow-x:auto;font-size:12px;white-space:pre-wrap;margin:6px 0}
+  .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-top:8px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<h1>Multi-Agent Code Review</h1>
+<div class="sub">LangGraph pipeline: static analysis and OWASP security agents run in parallel, then a fix-proposal agent and a merger build the report. <a href="/docs">API docs</a></div>
+
+<textarea id="code" placeholder="Paste Python code here, or run the built-in sample with intentional vulnerabilities"></textarea>
+<div class="actions">
+  <button id="btnSample">Run sample review</button>
+  <button id="btnCode" class="secondary">Review my code</button>
+</div>
+<div class="muted" id="limits"></div>
+<div id="status"></div>
+<div id="result"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function setStatus(msg, isErr) { $('status').textContent = msg; $('status').className = isErr ? 'err' : ''; }
+function setBusy(b) { $('btnSample').disabled = b; $('btnCode').disabled = b; }
+function errText(d) {
+  if (d && typeof d.detail === 'string') return d.detail;
+  if (d && Array.isArray(d.detail)) return d.detail.map(x => x.msg).join('; ');
+  return 'Something went wrong.';
+}
+
+async function loadLimits() {
+  try {
+    const d = await (await fetch('/reviews/limits')).json();
+    $('limits').textContent = d.remaining_today + ' of ' + d.daily_limit + ' demo reviews left today. Max ' + d.max_code_chars + ' characters.';
+    $('code').maxLength = d.max_code_chars;
+  } catch (e) {}
+}
+
+async function start(url, body) {
+  setBusy(true); $('result').innerHTML = ''; setStatus('Submitting...');
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const d = await r.json();
+    if (!r.ok) { setStatus(errText(d), true); setBusy(false); return; }
+    poll(d.job_id);
+  } catch (e) {
+    setStatus('Network error. The free server may be waking up, so try again in a minute.', true);
+    setBusy(false);
+  }
+}
+
+function poll(id) {
+  const started = Date.now();
+  const tick = async () => {
+    try {
+      const r = await fetch('/reviews/status/' + id);
+      if (!r.ok) { setStatus('The review was lost (the server restarted). Please run it again.', true); setBusy(false); return; }
+      const s = (await r.json()).status || '';
+      if (s === 'completed') {
+        const res = await (await fetch('/reviews/results/' + id)).json();
+        render(res); setStatus('Review complete.'); setBusy(false); loadLimits(); return;
+      }
+      if (s.startsWith('failed')) { setStatus('The review could not be completed. Please try again.', true); setBusy(false); return; }
+      if (Date.now() - started > 180000) { setStatus('Timed out waiting for the review.', true); setBusy(false); return; }
+      setStatus('Agents are working... (' + s + ', ' + Math.round((Date.now() - started) / 1000) + 's)');
+      setTimeout(tick, 1500);
+    } catch (e) { setTimeout(tick, 3000); }
+  };
+  tick();
+}
+
+const stat = (label, value) => '<div class="card"><div class="label">' + esc(label) + '</div><div class="value">' + esc(value) + '</div></div>';
+
+function render(r) {
+  const sc = r.severity_counts || {};
+  let html = '<div class="grid">' + stat('Total issues', r.total_issues ?? 0);
+  ['critical', 'high', 'medium', 'low', 'info'].forEach(k => { if (sc[k]) html += stat(k, sc[k]); });
+  html += stat('Review cost', '$' + Number(r.total_cost_usd || 0).toFixed(4)) + '</div>';
+
+  if (r.review_summary) html += '<h2>Summary</h2><pre>' + esc(r.review_summary) + '</pre>';
+
+  const issues = r.issues || [];
+  if (issues.length) {
+    html += '<h2>Issues</h2><div class="scroll"><table><thead><tr><th>Severity</th><th>Line</th><th>Issue</th><th>Details</th></tr></thead><tbody>';
+    html += issues.map(i => {
+      const sev = String(i.severity || 'info').toLowerCase();
+      return '<tr><td><span class="badge ' + esc(sev) + '">' + esc(sev) + '</span></td><td>' + esc(i.line_number ?? i.line ?? '') +
+        '</td><td>' + esc(i.title || i.issue_type || '') + '</td><td>' + esc(i.description || '') +
+        (i.suggestion ? '<div class="muted">Suggestion: ' + esc(i.suggestion) + '</div>' : '') + '</td></tr>';
+    }).join('');
+    html += '</tbody></table></div>';
+  }
+
+  const fixes = r.fix_proposals || [];
+  if (fixes.length) {
+    html += '<h2>Proposed fixes</h2>' + fixes.map(p =>
+      '<div class="card"><b>' + esc(p.issue_title || p.title || 'Fix') + '</b><div class="cols"><div><div class="label">Before</div><pre>' +
+      esc(p.original_code) + '</pre></div><div><div class="label">After</div><pre>' + esc(p.fixed_code) +
+      '</pre></div></div><div class="muted">' + esc(p.explanation || '') + '</div></div>').join('');
+  }
+
+  html += '<h2>Raw JSON</h2><details><summary class="muted">Show</summary><pre>' + esc(JSON.stringify(r, null, 2)) + '</pre></details>';
+  $('result').innerHTML = html;
+}
+
+$('btnSample').onclick = () => start('/reviews/submit/sample');
+$('btnCode').onclick = () => {
+  const code = $('code').value.trim();
+  if (!code) { setStatus('Paste some Python code first.', true); return; }
+  start('/reviews/submit', { filename: 'code.py', language: 'python', code: code });
+};
+loadLimits();
+</script>
+</body>
+</html>
