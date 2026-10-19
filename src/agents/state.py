@@ -3,7 +3,7 @@ from pydantic import BaseModel
 import operator
 
 
-# ─── Individual issue found by any agent ─────────────────────────────────────
+# Individual issue found by any agent
 class CodeIssue(BaseModel):
     agent: str
     issue_type: str
@@ -14,7 +14,7 @@ class CodeIssue(BaseModel):
     suggestion: str | None = None
 
 
-# ─── Fix proposed by the fix proposal agent ───────────────────────────────────
+# Fix proposed by the fix proposal agent
 class FixProposal(BaseModel):
     issue_title: str
     original_code: str
@@ -22,7 +22,7 @@ class FixProposal(BaseModel):
     explanation: str
 
 
-# ─── LangGraph state — shared across all agents ───────────────────────────────
+# LangGraph state, shared across all agents
 class PRState(TypedDict):
     # Input
     job_id: str
@@ -30,8 +30,10 @@ class PRState(TypedDict):
     language: str
     code: str
 
-    # Agent outputs (use operator.add so each agent appends its issues)
-    issues: Annotated[list[CodeIssue], operator.add]
+    # The parallel step returns one combined list and the merger returns the
+    # deduplicated list. Plain replacement is correct here: using operator.add
+    # would append the merger's list to the raw list and double-count.
+    issues: list[CodeIssue]
     fix_proposals: Annotated[list[FixProposal], operator.add]
 
     # Cost tracking
