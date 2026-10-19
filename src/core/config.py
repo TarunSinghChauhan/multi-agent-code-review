@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     max_cost_per_review_usd: float = 0.50
     max_concurrent_agents: int = 3
     agent_timeout_seconds: int = 60
-        # LLM step (set LLM_ENABLED=false for a fully free deployment with no API key)
+
+    # LLM step (set LLM_ENABLED=false for a fully free deployment with no API key)
     llm_enabled: bool = True
     llm_model: str = "openai/gpt-4o-mini"
     llm_input_price_per_million: float = 0.15
