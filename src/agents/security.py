@@ -8,9 +8,12 @@ from src.core.logging import get_logger
 
 
 def calculate_llm_cost(prompt_tokens: int, completion_tokens: int) -> float:
-    """Cost in USD for gpt-4o-mini pricing: $0.15/1M input, $0.60/1M output tokens."""
-    return (prompt_tokens * 0.15 + completion_tokens * 0.60) / 1_000_000
-
+    """Cost in USD using the configured per-million-token prices (defaults: gpt-4o-mini)."""
+    s = get_settings()
+    return (
+        prompt_tokens * s.llm_input_price_per_million
+        + completion_tokens * s.llm_output_price_per_million
+    ) / 1_000_000
 
 def strip_json_fence(raw: str) -> str:
     """Strip a markdown code fence (```json or plain ```) from an LLM response, if present."""
