@@ -5,7 +5,7 @@ from openai import AsyncOpenAI
 from src.agents.state import PRState, CodeIssue
 from src.core.config import get_settings
 from src.core.logging import get_logger
-from src.agents.security import calculate_llm_cost, strip_json_fence
+from src.agents.security import calculate_llm_cost, strip_json_fence, FENCE
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -26,7 +26,7 @@ def _get_client() -> AsyncOpenAI:
 
 
 def _analyze_python_ast(code: str) -> list[dict]:
-    """Pure static analysis using Python's AST — no API calls needed."""
+    """Pure static analysis using Python's AST. No API calls needed."""
     issues = []
     try:
         tree = ast.parse(code)
@@ -70,7 +70,7 @@ def _analyze_python_ast(code: str) -> list[dict]:
             })
 
         # Long lines via AST col_offset approximation
-        if isinstance(node, ast.Expr) and hasattr(node, 'col_offset'):
+        if isinstance(node, ast.Expr) and hasattr(node, "col_offset"):
             if node.col_offset > 100:
                 issues.append({
                     "type": "long_line",
@@ -79,7 +79,7 @@ def _analyze_python_ast(code: str) -> list[dict]:
                 })
 
     # Check line length directly
-    for i, line in enumerate(code.split('\n'), 1):
+    for i, line in enumerate(code.split("\n"), 1):
         if len(line) > 100:
             issues.append({
                 "type": "long_line",
@@ -94,14 +94,14 @@ async def static_analysis_agent(state: PRState) -> dict:
     """
     Agent 1: Static Analysis
     - Runs AST-based checks (no API cost)
-    - Uses LLM for deeper code quality analysis (when LLM_ENABLED=true)
+    - Uses LLM for deeper code quality analysis (only when LLM_ENABLED=true)
     - Checks complexity, naming, structure
     """
     logger.info("static_analysis_agent_started", job_id=state["job_id"])
     issues: list[CodeIssue] = []
     cost = 0.0
 
-    # ── 1. AST analysis (free) ────────────────────────────────────────────────
+    # 1. AST analysis (free)
     if state["language"] == "python":
         ast_issues = _analyze_python_ast(state["code"])
         for issue in ast_issues:
@@ -115,7 +115,7 @@ async def static_analysis_agent(state: PRState) -> dict:
                 suggestion="Refactor to follow Python best practices",
             ))
 
-    # ── 2. LLM code quality analysis (skipped when LLM_ENABLED=false) ────────
+    # 2. LLM code quality analysis (skipped when LLM_ENABLED=false)
     if not settings.llm_enabled:
         logger.info("static_llm_skipped", job_id=state["job_id"])
         return {"issues": issues, "total_cost_usd": state["total_cost_usd"]}
@@ -124,3 +124,63 @@ async def static_analysis_agent(state: PRState) -> dict:
         prompt = f"""Analyze this {state['language']} code for quality issues.
 
 Code from file: {state['filename']}
+{FENCE}
+{state['code'][:3000]}
+{FENCE}
+
+Find issues with:
+- Code complexity and readability
+- Naming conventions
+- Function/class design
+- Missing docstrings
+- Dead code or unused variables
+- Performance concerns
+
+Respond ONLY with valid JSON array:
+[
+  {{
+    "issue_type": "string",
+    "severity": "critical|high|medium|low|info",
+    "line_number": null or integer,
+    "title": "short title",
+    "description": "clear description",
+    "suggestion": "how to fix"
+  }}
+]
+
+Return empty array [] if no issues found."""
+
+        response = await _get_client().chat.completions.create(
+            model=settings.llm_model,
+            messages=[
+                {"role": "system", "content": "You are an expert code reviewer. Respond only with valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1000,
+            temperature=0.0,
+            extra_headers={"HTTP-Referer": "https://github.com/multi-agent-code-review", "X-Title": "Code Review"},
+        )
+
+        raw = response.choices[0].message.content or "[]"
+        raw = strip_json_fence(raw)
+
+        llm_issues = json.loads(raw)
+        for issue in llm_issues:
+            issues.append(CodeIssue(
+                agent="static_analysis",
+                issue_type=issue.get("issue_type", "code_quality"),
+                severity=issue.get("severity", "medium"),
+                line_number=issue.get("line_number"),
+                title=issue.get("title", "Code Quality Issue"),
+                description=issue.get("description", ""),
+                suggestion=issue.get("suggestion"),
+            ))
+
+        if response.usage:
+            cost = calculate_llm_cost(response.usage.prompt_tokens, response.usage.completion_tokens)
+
+    except Exception as e:
+        logger.error("static_analysis_llm_failed", error=str(e))
+
+    logger.info("static_analysis_agent_done", job_id=state["job_id"], issues_found=len(issues), cost=cost)
+    return {"issues": issues, "total_cost_usd": state["total_cost_usd"] + cost}
