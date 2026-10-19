@@ -94,7 +94,7 @@ async def static_analysis_agent(state: PRState) -> dict:
     """
     Agent 1: Static Analysis
     - Runs AST-based checks (no API cost)
-    - Uses LLM for deeper code quality analysis
+    - Uses LLM for deeper code quality analysis (when LLM_ENABLED=true)
     - Checks complexity, naming, structure
     """
     logger.info("static_analysis_agent_started", job_id=state["job_id"])
@@ -115,71 +115,12 @@ async def static_analysis_agent(state: PRState) -> dict:
                 suggestion="Refactor to follow Python best practices",
             ))
 
-    # ── 2. LLM code quality analysis ─────────────────────────────────────────
-       try:
-        if not settings.llm_enabled:
-            logger.info("static_llm_skipped", job_id=state["job_id"])
-            return {"issues": issues, "total_cost_usd": state["total_cost_usd"]}
+    # ── 2. LLM code quality analysis (skipped when LLM_ENABLED=false) ────────
+    if not settings.llm_enabled:
+        logger.info("static_llm_skipped", job_id=state["job_id"])
+        return {"issues": issues, "total_cost_usd": state["total_cost_usd"]}
+
+    try:
         prompt = f"""Analyze this {state['language']} code for quality issues.
 
 Code from file: {state['filename']}
-```
-{state['code'][:3000]}
-```
-
-Find issues with:
-- Code complexity and readability
-- Naming conventions
-- Function/class design
-- Missing docstrings
-- Dead code or unused variables
-- Performance concerns
-
-Respond ONLY with valid JSON array:
-[
-  {{
-    "issue_type": "string",
-    "severity": "critical|high|medium|low|info",
-    "line_number": null or integer,
-    "title": "short title",
-    "description": "clear description",
-    "suggestion": "how to fix"
-  }}
-]
-
-Return empty array [] if no issues found."""
-
-        response = await _get_client().chat.completions.create(
-            model="openai/gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an expert code reviewer. Respond only with valid JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=1000,
-            temperature=0.0,
-            extra_headers={"HTTP-Referer": "https://github.com/multi-agent-code-review", "X-Title": "Code Review"},
-        )
-
-        raw = response.choices[0].message.content or "[]"
-        raw = strip_json_fence(raw)
-
-        llm_issues = json.loads(raw)
-        for issue in llm_issues:
-            issues.append(CodeIssue(
-                agent="static_analysis",
-                issue_type=issue.get("issue_type", "code_quality"),
-                severity=issue.get("severity", "medium"),
-                line_number=issue.get("line_number"),
-                title=issue.get("title", "Code Quality Issue"),
-                description=issue.get("description", ""),
-                suggestion=issue.get("suggestion"),
-            ))
-
-        if response.usage:
-            cost = calculate_llm_cost(response.usage.prompt_tokens, response.usage.completion_tokens)
-
-    except Exception as e:
-        logger.error("static_analysis_llm_failed", error=str(e))
-
-    logger.info("static_analysis_agent_done", job_id=state["job_id"], issues_found=len(issues), cost=cost)
-    return {"issues": issues, "total_cost_usd": state["total_cost_usd"] + cost}
