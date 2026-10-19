@@ -179,7 +179,10 @@ async def security_agent(state: PRState) -> dict:
     issues.extend(pattern_issues)
 
     # ── 2. LLM deep security analysis ─────────────────────────────────────────
-    try:
+       try:
+        if not settings.llm_enabled:
+            logger.info("security_llm_skipped", job_id=state["job_id"])
+            return {"issues": issues, "total_cost_usd": state["total_cost_usd"]}
         prompt = f"""Perform a security audit of this {state['language']} code.
 
 File: {state['filename']}
