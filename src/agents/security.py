@@ -15,6 +15,7 @@ def calculate_llm_cost(prompt_tokens: int, completion_tokens: int) -> float:
         + completion_tokens * s.llm_output_price_per_million
     ) / 1_000_000
 
+
 def strip_json_fence(raw: str) -> str:
     """Strip a markdown code fence (```json or plain ```) from an LLM response, if present."""
     if "```json" in raw:
@@ -167,7 +168,7 @@ async def security_agent(state: PRState) -> dict:
     """
     Agent 2: Security Scanner
     - Pattern-based scan (OWASP Top 10 patterns)
-    - LLM deep security analysis
+    - LLM deep security analysis (when LLM_ENABLED=true)
     - Identifies hardcoded secrets, injection risks, insecure patterns
     """
     logger.info("security_agent_started", job_id=state["job_id"])
@@ -178,73 +179,12 @@ async def security_agent(state: PRState) -> dict:
     pattern_issues = _pattern_scan(state["code"])
     issues.extend(pattern_issues)
 
-    # ── 2. LLM deep security analysis ─────────────────────────────────────────
-       try:
-        if not settings.llm_enabled:
-            logger.info("security_llm_skipped", job_id=state["job_id"])
-            return {"issues": issues, "total_cost_usd": state["total_cost_usd"]}
+    # ── 2. LLM deep security analysis (skipped when LLM_ENABLED=false) ───────
+    if not settings.llm_enabled:
+        logger.info("security_llm_skipped", job_id=state["job_id"])
+        return {"issues": issues, "total_cost_usd": state["total_cost_usd"]}
+
+    try:
         prompt = f"""Perform a security audit of this {state['language']} code.
 
 File: {state['filename']}
-```
-{state['code'][:3000]}
-```
-
-Check for:
-- Injection vulnerabilities (SQL, command, LDAP)
-- Authentication and authorization flaws
-- Sensitive data exposure
-- Security misconfiguration
-- Insecure direct object references
-- Cross-site scripting (if applicable)
-- Insecure dependencies usage
-- Input validation issues
-
-Respond ONLY with valid JSON array:
-[
-  {{
-    "issue_type": "string",
-    "severity": "critical|high|medium|low|info",
-    "line_number": null or integer,
-    "title": "short title",
-    "description": "clear description of the vulnerability",
-    "suggestion": "how to fix securely"
-  }}
-]
-
-Return [] if no additional security issues found beyond obvious ones."""
-
-        response = await _get_client().chat.completions.create(
-            model="openai/gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an expert security engineer specializing in code security audits. Respond only with valid JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=1000,
-            temperature=0.0,
-            extra_headers={"HTTP-Referer": "https://github.com/multi-agent-code-review", "X-Title": "Code Review"},
-        )
-
-        raw = response.choices[0].message.content or "[]"
-        raw = strip_json_fence(raw)
-
-        llm_issues = json.loads(raw)
-        for issue in llm_issues:
-            issues.append(CodeIssue(
-                agent="security",
-                issue_type=issue.get("issue_type", "security"),
-                severity=issue.get("severity", "high"),
-                line_number=issue.get("line_number"),
-                title=issue.get("title", "Security Issue"),
-                description=issue.get("description", ""),
-                suggestion=issue.get("suggestion"),
-            ))
-
-        if response.usage:
-            cost = calculate_llm_cost(response.usage.prompt_tokens, response.usage.completion_tokens)
-
-    except Exception as e:
-        logger.error("security_agent_llm_failed", error=str(e))
-
-    logger.info("security_agent_done", job_id=state["job_id"], issues_found=len(issues), cost=cost)
-    return {"issues": issues, "total_cost_usd": state["total_cost_usd"] + cost}
