@@ -1,18 +1,72 @@
+import os
+import time
 import uuid
 import math
-from fastapi import APIRouter, BackgroundTasks, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
 from src.agents.orchestrator import CodeReviewOrchestrator
+from src.core.database import AsyncSessionLocal, ReviewJob
 from src.core.logging import get_logger
 
 router = APIRouter()
 logger = get_logger(__name__)
 
+# Public-demo guardrails (override with environment variables)
+MAX_CODE_CHARS = int(os.getenv("MAX_CODE_CHARS", "6000"))
+DAILY_REVIEW_LIMIT = int(os.getenv("DAILY_REVIEW_LIMIT", "30"))
+PER_IP_HOURLY_LIMIT = int(os.getenv("PER_IP_HOURLY_LIMIT", "5"))
+MAX_STORED_JOBS = 100
+
 _job_status: dict[str, str] = {}
 _job_results: dict[str, dict] = {}
+_ip_hits: dict[str, deque] = defaultdict(deque)
+_daily = {"day": "", "count": 0}
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _client_ip(http_request: Request) -> str:
+    forwarded = http_request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return http_request.client.host if http_request.client else "unknown"
+
+
+def _enforce_limits(http_request: Request) -> None:
+    """Best-effort limits. The OpenRouter key's credit limit is the hard backstop."""
+    now = time.time()
+    today = _today()
+    if _daily["day"] != today:
+        _daily["day"], _daily["count"] = today, 0
+    if _daily["count"] >= DAILY_REVIEW_LIMIT:
+        raise HTTPException(status_code=429, detail="Daily demo limit reached. Please try again tomorrow.")
+
+    if len(_ip_hits) > 5000:
+        _ip_hits.clear()
+    hits = _ip_hits[_client_ip(http_request)]
+    while hits and now - hits[0] > 3600:
+        hits.popleft()
+    if len(hits) >= PER_IP_HOURLY_LIMIT:
+        raise HTTPException(status_code=429, detail="Hourly limit reached for your connection. Please try again later.")
+
+    hits.append(now)
+    _daily["count"] += 1
+
+
+def _remember(job_id: str) -> None:
+    """Keep only the most recent jobs in memory."""
+    _job_status[job_id] = "pending"
+    while len(_job_status) > MAX_STORED_JOBS:
+        oldest = next(iter(_job_status))
+        _job_status.pop(oldest, None)
+        _job_results.pop(oldest, None)
 
 
 def clean_nans(obj):
@@ -56,9 +110,28 @@ def serialize_result(final_state: dict) -> dict:
 
 
 class ReviewRequest(BaseModel):
-    filename: str = "code.py"
-    language: str = "python"
-    code: str
+    filename: str = Field(default="code.py", max_length=100)
+    language: str = Field(default="python", pattern="^python$")
+    code: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+
+
+async def _save_job(job_id: str, request: ReviewRequest, result: dict) -> None:
+    """Best-effort: store review metadata in Postgres."""
+    try:
+        async with AsyncSessionLocal() as session:
+            session.add(ReviewJob(
+                id=job_id,
+                filename=request.filename,
+                language=request.language,
+                status="completed",
+                completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                total_cost_usd=result.get("total_cost_usd", 0.0),
+                total_issues=result.get("total_issues", 0),
+                critical_issues=(result.get("severity_counts") or {}).get("critical", 0),
+            ))
+            await session.commit()
+    except Exception as exc:
+        logger.warning("job_save_failed", job_id=job_id, error=str(exc))
 
 
 async def _run_review_task(job_id: str, request: ReviewRequest):
@@ -71,20 +144,33 @@ async def _run_review_task(job_id: str, request: ReviewRequest):
             code=request.code,
             language=request.language,
         )
-        result = serialize_result(final_state)
-        _job_results[job_id] = clean_nans(result)
+        result = clean_nans(serialize_result(final_state))
+        _job_results[job_id] = result
         _job_status[job_id] = "completed"
+        await _save_job(job_id, request, result)
     except Exception as e:
         import traceback
         logger.error("review_task_failed", job_id=job_id, error=str(e), traceback=traceback.format_exc())
-        _job_status[job_id] = f"failed: {str(e)}"
+        _job_status[job_id] = "failed: the review could not be completed"
+
+
+@router.get("/limits")
+async def limits():
+    used = _daily["count"] if _daily["day"] == _today() else 0
+    return {
+        "daily_limit": DAILY_REVIEW_LIMIT,
+        "used_today": used,
+        "remaining_today": max(0, DAILY_REVIEW_LIMIT - used),
+        "max_code_chars": MAX_CODE_CHARS,
+    }
 
 
 @router.post("/submit")
-async def submit_review(request: ReviewRequest, background_tasks: BackgroundTasks):
+async def submit_review(request: ReviewRequest, http_request: Request, background_tasks: BackgroundTasks):
     """Submit code for multi-agent review."""
+    _enforce_limits(http_request)
     job_id = str(uuid.uuid4())[:8]
-    _job_status[job_id] = "pending"
+    _remember(job_id)
     background_tasks.add_task(_run_review_task, job_id, request)
     return {
         "job_id": job_id,
@@ -109,14 +195,10 @@ async def get_results(job_id: str):
     return JSONResponse(content=_job_results[job_id])
 
 
-@router.get("/jobs")
-async def list_jobs():
-    return {"jobs": [{"job_id": k, "status": v} for k, v in _job_status.items()]}
-
-
 @router.post("/submit/sample")
-async def submit_sample_review(background_tasks: BackgroundTasks):
+async def submit_sample_review(http_request: Request, background_tasks: BackgroundTasks):
     """Submit a built-in sample with intentional bugs for demo purposes."""
+    _enforce_limits(http_request)
     sample_code = '''import pickle
 import hashlib
 import subprocess
@@ -155,7 +237,7 @@ DEBUG = True
 '''
 
     job_id = str(uuid.uuid4())[:8]
-    _job_status[job_id] = "pending"
+    _remember(job_id)
     request = ReviewRequest(
         filename="vulnerable_code.py",
         language="python",
