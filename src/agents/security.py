@@ -6,6 +6,9 @@ from src.agents.state import PRState, CodeIssue
 from src.core.config import get_settings
 from src.core.logging import get_logger
 
+# Three backticks, built in code so this file never contains a markdown fence.
+FENCE = "`" * 3
+
 
 def calculate_llm_cost(prompt_tokens: int, completion_tokens: int) -> float:
     """Cost in USD using the configured per-million-token prices (defaults: gpt-4o-mini)."""
@@ -17,12 +20,13 @@ def calculate_llm_cost(prompt_tokens: int, completion_tokens: int) -> float:
 
 
 def strip_json_fence(raw: str) -> str:
-    """Strip a markdown code fence (```json or plain ```) from an LLM response, if present."""
-    if "```json" in raw:
-        return raw.split("```json")[1].split("```")[0].strip()
-    elif "```" in raw:
-        return raw.split("```")[1].split("```")[0].strip()
+    """Strip a markdown code fence (json-tagged or plain) from an LLM response, if present."""
+    if FENCE + "json" in raw:
+        return raw.split(FENCE + "json")[1].split(FENCE)[0].strip()
+    elif FENCE in raw:
+        return raw.split(FENCE)[1].split(FENCE)[0].strip()
     return raw
+
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -34,7 +38,7 @@ def _get_client() -> AsyncOpenAI:
     """Lazily construct the OpenAI client on first use, not at import time.
     This lets the module (and anything that imports its pure functions,
     like calculate_llm_cost or strip_json_fence) be imported safely even
-    when no API key is configured yet — e.g. in tests or tooling that
+    when no API key is configured yet, e.g. in tests or tooling that
     only needs the non-LLM helpers."""
     global _client
     if _client is None:
@@ -44,7 +48,8 @@ def _get_client() -> AsyncOpenAI:
         )
     return _client
 
-# ─── Pattern-based security checks (free, no API) ─────────────────────────────
+
+# Pattern-based security checks (free, no API)
 SECURITY_PATTERNS = [
     {
         "pattern": r"password\s*=\s*['\"][^'\"]+['\"]",
@@ -76,7 +81,7 @@ SECURITY_PATTERNS = [
         "severity": "high",
         "title": "Dangerous exec() Usage",
         "description": "exec() can execute arbitrary code",
-        "suggestion": "Avoid exec() — restructure code to avoid dynamic execution",
+        "suggestion": "Avoid exec(); restructure code to avoid dynamic execution",
     },
     {
         "pattern": r"shell\s*=\s*True",
@@ -146,9 +151,9 @@ SECURITY_PATTERNS = [
 
 
 def _pattern_scan(code: str) -> list[CodeIssue]:
-    """Scan code with regex patterns — fast, no API cost."""
+    """Scan code with regex patterns: fast, no API cost."""
     issues = []
-    lines = code.split('\n')
+    lines = code.split("\n")
     for i, line in enumerate(lines, 1):
         for check in SECURITY_PATTERNS:
             if re.search(check["pattern"], line, re.IGNORECASE):
@@ -168,18 +173,18 @@ async def security_agent(state: PRState) -> dict:
     """
     Agent 2: Security Scanner
     - Pattern-based scan (OWASP Top 10 patterns)
-    - LLM deep security analysis (when LLM_ENABLED=true)
+    - LLM deep security analysis (only when LLM_ENABLED=true)
     - Identifies hardcoded secrets, injection risks, insecure patterns
     """
     logger.info("security_agent_started", job_id=state["job_id"])
     issues: list[CodeIssue] = []
     cost = 0.0
 
-    # ── 1. Pattern scan (free) ────────────────────────────────────────────────
+    # 1. Pattern scan (free)
     pattern_issues = _pattern_scan(state["code"])
     issues.extend(pattern_issues)
 
-    # ── 2. LLM deep security analysis (skipped when LLM_ENABLED=false) ───────
+    # 2. LLM deep security analysis (skipped when LLM_ENABLED=false)
     if not settings.llm_enabled:
         logger.info("security_llm_skipped", job_id=state["job_id"])
         return {"issues": issues, "total_cost_usd": state["total_cost_usd"]}
@@ -188,3 +193,65 @@ async def security_agent(state: PRState) -> dict:
         prompt = f"""Perform a security audit of this {state['language']} code.
 
 File: {state['filename']}
+{FENCE}
+{state['code'][:3000]}
+{FENCE}
+
+Check for:
+- Injection vulnerabilities (SQL, command, LDAP)
+- Authentication and authorization flaws
+- Sensitive data exposure
+- Security misconfiguration
+- Insecure direct object references
+- Cross-site scripting (if applicable)
+- Insecure dependencies usage
+- Input validation issues
+
+Respond ONLY with valid JSON array:
+[
+  {{
+    "issue_type": "string",
+    "severity": "critical|high|medium|low|info",
+    "line_number": null or integer,
+    "title": "short title",
+    "description": "clear description of the vulnerability",
+    "suggestion": "how to fix securely"
+  }}
+]
+
+Return [] if no additional security issues found beyond obvious ones."""
+
+        response = await _get_client().chat.completions.create(
+            model=settings.llm_model,
+            messages=[
+                {"role": "system", "content": "You are an expert security engineer specializing in code security audits. Respond only with valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1000,
+            temperature=0.0,
+            extra_headers={"HTTP-Referer": "https://github.com/multi-agent-code-review", "X-Title": "Code Review"},
+        )
+
+        raw = response.choices[0].message.content or "[]"
+        raw = strip_json_fence(raw)
+
+        llm_issues = json.loads(raw)
+        for issue in llm_issues:
+            issues.append(CodeIssue(
+                agent="security",
+                issue_type=issue.get("issue_type", "security"),
+                severity=issue.get("severity", "high"),
+                line_number=issue.get("line_number"),
+                title=issue.get("title", "Security Issue"),
+                description=issue.get("description", ""),
+                suggestion=issue.get("suggestion"),
+            ))
+
+        if response.usage:
+            cost = calculate_llm_cost(response.usage.prompt_tokens, response.usage.completion_tokens)
+
+    except Exception as e:
+        logger.error("security_agent_llm_failed", error=str(e))
+
+    logger.info("security_agent_done", job_id=state["job_id"], issues_found=len(issues), cost=cost)
+    return {"issues": issues, "total_cost_usd": state["total_cost_usd"] + cost}
