@@ -18,9 +18,16 @@ def test_health_route_is_registered(client):
     assert resp.status_code == 200
 
 
-def test_reviews_jobs_route_is_registered(client):
-    resp = client.get("/reviews/jobs")
+def test_listing_all_jobs_is_not_exposed(client):
+    # GET /reviews/jobs was removed on purpose: job ids are the only access control
+    # on results, so the demo must not list them.
+    assert client.get("/reviews/jobs").status_code == 404
+
+
+def test_limits_route_is_registered(client):
+    resp = client.get("/reviews/limits")
     assert resp.status_code == 200
+    assert set(resp.json()) == {"daily_limit", "used_today", "remaining_today", "max_code_chars"}
 
 
 def test_lifespan_calls_create_tables_on_startup():
