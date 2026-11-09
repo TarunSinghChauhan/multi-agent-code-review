@@ -199,7 +199,7 @@ async def test_unknown_job_returns_404(client):
 
 
 @pytest.mark.asyncio
-async def test_list_jobs(client):
+async def test_listing_all_jobs_is_not_exposed(client):
+    # Removed on purpose: job ids are the only access control on results.
     resp = await client.get("/reviews/jobs")
-    assert resp.status_code == 200
-    assert "jobs" in resp.json()
+    assert resp.status_code == 404

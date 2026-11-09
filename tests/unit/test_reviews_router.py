@@ -99,17 +99,42 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.responses import JSONResponse
 from fastapi import HTTPException
 
+from types import SimpleNamespace
+
+from pydantic import ValidationError
+
+import src.api.routers.reviews as reviews_module
 from src.api.routers.reviews import (
     _run_review_task,
     _job_status,
     _job_results,
+    _client_ip,
+    _enforce_limits,
+    _remember,
+    limits,
     submit_review,
     get_status,
     get_results,
-    list_jobs,
     submit_sample_review,
     ReviewRequest,
 )
+
+
+def fake_request(ip="10.0.0.1", forwarded=None):
+    """Just enough of a starlette Request for the limit helpers."""
+    headers = {"x-forwarded-for": forwarded} if forwarded else {}
+    client = SimpleNamespace(host=ip) if ip else None
+    return SimpleNamespace(headers=headers, client=client)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_limiter_state():
+    """The rate limiter keeps module-level state; give every test a clean slate."""
+    reviews_module._ip_hits.clear()
+    reviews_module._daily.update(day="", count=0)
+    yield
+    reviews_module._ip_hits.clear()
+    reviews_module._daily.update(day="", count=0)
 
 
 @pytest.mark.asyncio
@@ -142,7 +167,9 @@ async def test_run_review_task_failure_sets_failed_status_with_error_message():
     fake_orchestrator.review = AsyncMock(side_effect=RuntimeError("agent crashed"))
     with patch("src.api.routers.reviews.CodeReviewOrchestrator", return_value=fake_orchestrator):
         await _run_review_task(job_id, request)
-    assert _job_status[job_id] == "failed: agent crashed"
+    # The caller gets a generic message; the real error is only logged.
+    assert _job_status[job_id] == "failed: the review could not be completed"
+    assert "agent crashed" not in _job_status[job_id]
     assert job_id not in _job_results
 
 
@@ -150,7 +177,7 @@ async def test_run_review_task_failure_sets_failed_status_with_error_message():
 async def test_submit_review_schedules_task_and_returns_pending_status():
     fake_bg_tasks = MagicMock()
     request = ReviewRequest(filename="test.py", language="python", code="y = 2")
-    result = await submit_review(request, fake_bg_tasks)
+    result = await submit_review(request, fake_request(), fake_bg_tasks)
     assert result["status"] == "pending"
     assert "job_id" in result
     fake_bg_tasks.add_task.assert_called_once()
@@ -200,19 +227,9 @@ async def test_get_results_returns_json_response_when_completed():
 
 
 @pytest.mark.asyncio
-async def test_list_jobs_returns_all_tracked_statuses():
-    job_id = str(uuid.uuid4())[:8]
-    _job_status[job_id] = "pending"
-    result = await list_jobs()
-    matching = [j for j in result["jobs"] if j["job_id"] == job_id]
-    assert len(matching) == 1
-    assert matching[0]["status"] == "pending"
-
-
-@pytest.mark.asyncio
 async def test_submit_sample_review_schedules_vulnerable_sample_code():
     fake_bg_tasks = MagicMock()
-    result = await submit_sample_review(fake_bg_tasks)
+    result = await submit_sample_review(fake_request(), fake_bg_tasks)
     assert result["status"] == "pending"
     assert "job_id" in result
     fake_bg_tasks.add_task.assert_called_once()
@@ -237,3 +254,120 @@ def test_serialize_result_accepts_plain_dict_fix_proposals():
     result = serialize_result(final_state)
     assert len(result["fix_proposals"]) == 1
     assert result["fix_proposals"][0]["issue_title"] == "Fix SQL injection"
+
+
+# ---- public-demo guardrails -------------------------------------------------
+
+def test_client_ip_prefers_the_first_forwarded_address():
+    assert _client_ip(fake_request(forwarded="203.0.113.9, 10.1.1.1")) == "203.0.113.9"
+    assert _client_ip(fake_request(forwarded="  203.0.113.9  ")) == "203.0.113.9"
+
+
+def test_client_ip_falls_back_to_the_socket_address_then_unknown():
+    assert _client_ip(fake_request(ip="192.0.2.7")) == "192.0.2.7"
+    assert _client_ip(fake_request(ip=None)) == "unknown"
+
+
+def test_per_ip_hourly_limit_blocks_the_next_request(monkeypatch):
+    monkeypatch.setattr(reviews_module, "PER_IP_HOURLY_LIMIT", 3)
+    for _ in range(3):
+        _enforce_limits(fake_request())
+    with pytest.raises(HTTPException) as exc:
+        _enforce_limits(fake_request())
+    assert exc.value.status_code == 429
+    assert "Hourly" in exc.value.detail
+
+
+def test_each_ip_has_its_own_hourly_allowance(monkeypatch):
+    monkeypatch.setattr(reviews_module, "PER_IP_HOURLY_LIMIT", 1)
+    _enforce_limits(fake_request(ip="10.0.0.1"))
+    _enforce_limits(fake_request(ip="10.0.0.2"))  # a different visitor is unaffected
+    with pytest.raises(HTTPException):
+        _enforce_limits(fake_request(ip="10.0.0.1"))
+
+
+def test_hourly_allowance_comes_back_after_an_hour(monkeypatch):
+    monkeypatch.setattr(reviews_module, "PER_IP_HOURLY_LIMIT", 1)
+    now = [1_000_000.0]
+    monkeypatch.setattr(reviews_module.time, "time", lambda: now[0])
+    _enforce_limits(fake_request())
+    now[0] += 3599
+    with pytest.raises(HTTPException):
+        _enforce_limits(fake_request())
+    now[0] += 2  # just past the one-hour window
+    _enforce_limits(fake_request())
+
+
+def test_daily_limit_blocks_everyone_until_the_next_day(monkeypatch):
+    monkeypatch.setattr(reviews_module, "DAILY_REVIEW_LIMIT", 2)
+    monkeypatch.setattr(reviews_module, "PER_IP_HOURLY_LIMIT", 100)
+    monkeypatch.setattr(reviews_module, "_today", lambda: "2026-01-01")
+    _enforce_limits(fake_request(ip="10.0.0.1"))
+    _enforce_limits(fake_request(ip="10.0.0.2"))
+    with pytest.raises(HTTPException) as exc:
+        _enforce_limits(fake_request(ip="10.0.0.3"))
+    assert exc.value.status_code == 429
+    assert "Daily" in exc.value.detail
+
+    monkeypatch.setattr(reviews_module, "_today", lambda: "2026-01-02")
+    _enforce_limits(fake_request(ip="10.0.0.3"))  # counter reset with the new day
+
+
+def test_a_blocked_request_does_not_use_up_the_daily_quota(monkeypatch):
+    monkeypatch.setattr(reviews_module, "PER_IP_HOURLY_LIMIT", 1)
+    _enforce_limits(fake_request())
+    with pytest.raises(HTTPException):
+        _enforce_limits(fake_request())
+    assert reviews_module._daily["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_limits_endpoint_reports_the_remaining_daily_quota(monkeypatch):
+    monkeypatch.setattr(reviews_module, "DAILY_REVIEW_LIMIT", 10)
+    monkeypatch.setattr(reviews_module, "_today", lambda: "2026-01-01")
+    _enforce_limits(fake_request())
+    out = await limits()
+    assert out["daily_limit"] == 10
+    assert out["used_today"] == 1
+    assert out["remaining_today"] == 9
+    assert out["max_code_chars"] == reviews_module.MAX_CODE_CHARS
+
+
+@pytest.mark.asyncio
+async def test_limits_endpoint_shows_zero_used_on_a_new_day(monkeypatch):
+    monkeypatch.setattr(reviews_module, "_today", lambda: "2026-01-01")
+    _enforce_limits(fake_request())
+    monkeypatch.setattr(reviews_module, "_today", lambda: "2026-01-02")
+    assert (await limits())["used_today"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_submit_never_schedules_a_review(monkeypatch):
+    monkeypatch.setattr(reviews_module, "PER_IP_HOURLY_LIMIT", 0)
+    fake_bg_tasks = MagicMock()
+    request = ReviewRequest(code="x = 1")
+    with pytest.raises(HTTPException) as exc:
+        await submit_review(request, fake_request(), fake_bg_tasks)
+    assert exc.value.status_code == 429
+    fake_bg_tasks.add_task.assert_not_called()
+
+
+def test_remember_keeps_only_the_most_recent_jobs(monkeypatch):
+    monkeypatch.setattr(reviews_module, "MAX_STORED_JOBS", 3)
+    monkeypatch.setattr(reviews_module, "_job_status", {})
+    monkeypatch.setattr(reviews_module, "_job_results", {"a": {"x": 1}})
+    for job_id in ["a", "b", "c", "d"]:
+        _remember(job_id)
+    assert list(reviews_module._job_status) == ["b", "c", "d"]
+    assert "a" not in reviews_module._job_results  # evicted together with its status
+    assert reviews_module._job_status["d"] == "pending"
+
+
+def test_review_request_rejects_oversized_empty_and_non_python_code():
+    with pytest.raises(ValidationError):
+        ReviewRequest(code="x" * (reviews_module.MAX_CODE_CHARS + 1))
+    with pytest.raises(ValidationError):
+        ReviewRequest(code="")
+    with pytest.raises(ValidationError):
+        ReviewRequest(code="x = 1", language="javascript")
+    assert ReviewRequest(code="x" * reviews_module.MAX_CODE_CHARS).language == "python"
