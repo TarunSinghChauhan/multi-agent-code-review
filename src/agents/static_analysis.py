@@ -3,6 +3,7 @@ import json
 from openai import AsyncOpenAI
 
 from src.agents.state import PRState, CodeIssue
+from src.agents.chunking import split_for_llm, shift_line
 from src.core.config import get_settings
 from src.core.logging import get_logger
 from src.agents.security import calculate_llm_cost, strip_json_fence, FENCE
@@ -120,12 +121,15 @@ async def static_analysis_agent(state: PRState) -> dict:
         logger.info("static_llm_skipped", job_id=state["job_id"])
         return {"issues": issues, "total_cost_usd": state["total_cost_usd"]}
 
-    try:
-        prompt = f"""Analyze this {state['language']} code for quality issues.
+    # The model sees the whole accepted input, a piece at a time, instead of only the
+    # first 3000 characters. One failing piece does not lose the others' findings.
+    for offset, chunk in split_for_llm(state["code"]):
+        try:
+            prompt = f"""Analyze this {state['language']} code for quality issues.
 
 Code from file: {state['filename']}
 {FENCE}
-{state['code'][:3000]}
+{chunk}
 {FENCE}
 
 Find issues with:
@@ -150,37 +154,37 @@ Respond ONLY with valid JSON array:
 
 Return empty array [] if no issues found."""
 
-        response = await _get_client().chat.completions.create(
-            model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": "You are an expert code reviewer. Respond only with valid JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=1000,
-            temperature=0.0,
-            extra_headers={"HTTP-Referer": "https://github.com/multi-agent-code-review", "X-Title": "Code Review"},
-        )
+            response = await _get_client().chat.completions.create(
+                model=settings.llm_model,
+                messages=[
+                    {"role": "system", "content": "You are an expert code reviewer. Respond only with valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=1000,
+                temperature=0.0,
+                extra_headers={"HTTP-Referer": "https://github.com/multi-agent-code-review", "X-Title": "Code Review"},
+            )
 
-        raw = response.choices[0].message.content or "[]"
-        raw = strip_json_fence(raw)
+            raw = response.choices[0].message.content or "[]"
+            raw = strip_json_fence(raw)
 
-        llm_issues = json.loads(raw)
-        for issue in llm_issues:
-            issues.append(CodeIssue(
-                agent="static_analysis",
-                issue_type=issue.get("issue_type", "code_quality"),
-                severity=issue.get("severity", "medium"),
-                line_number=issue.get("line_number"),
-                title=issue.get("title", "Code Quality Issue"),
-                description=issue.get("description", ""),
-                suggestion=issue.get("suggestion"),
-            ))
+            llm_issues = json.loads(raw)
+            for issue in llm_issues:
+                issues.append(CodeIssue(
+                    agent="static_analysis",
+                    issue_type=issue.get("issue_type", "code_quality"),
+                    severity=issue.get("severity", "medium"),
+                    line_number=shift_line(issue.get("line_number"), offset),
+                    title=issue.get("title", "Code Quality Issue"),
+                    description=issue.get("description", ""),
+                    suggestion=issue.get("suggestion"),
+                ))
 
-        if response.usage:
-            cost = calculate_llm_cost(response.usage.prompt_tokens, response.usage.completion_tokens)
+            if response.usage:
+                cost += calculate_llm_cost(response.usage.prompt_tokens, response.usage.completion_tokens)
 
-    except Exception as e:
-        logger.error("static_analysis_llm_failed", error=str(e))
+        except Exception as e:
+            logger.error("static_analysis_llm_failed", error=str(e), chunk_start_line=offset + 1)
 
     logger.info("static_analysis_agent_done", job_id=state["job_id"], issues_found=len(issues), cost=cost)
     return {"issues": issues, "total_cost_usd": state["total_cost_usd"] + cost}
