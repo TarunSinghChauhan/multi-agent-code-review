@@ -5,11 +5,18 @@ logger = get_logger(__name__)
 
 
 def _deduplicate(issues: list[CodeIssue]) -> list[CodeIssue]:
-    """Remove duplicate issues based on type + line number."""
+    """Remove duplicate issues based on type + line number (+ title when there is no line)."""
     seen = set()
     unique = []
     for issue in issues:
-        key = (issue.issue_type, issue.line_number, issue.agent)
+        # Without a line number, type + agent alone would merge two different findings
+        # (say, two separate SQL injections the model could not place) into one.
+        key = (
+            issue.issue_type,
+            issue.line_number,
+            issue.agent,
+            issue.title if issue.line_number is None else None,
+        )
         if key not in seen:
             seen.add(key)
             unique.append(issue)
