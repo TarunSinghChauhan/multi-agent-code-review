@@ -1,6 +1,17 @@
 from typing import TypedDict, Annotated
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import operator
+
+
+SEVERITIES = ("critical", "high", "medium", "low", "info")
+_SEVERITY_ALIASES = {
+    "severe": "critical",
+    "moderate": "medium",
+    "warning": "medium",
+    "minor": "low",
+    "informational": "info",
+    "information": "info",
+}
 
 
 # Individual issue found by any agent
@@ -12,6 +23,22 @@ class CodeIssue(BaseModel):
     title: str
     description: str
     suggestion: str | None = None
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _normalize_severity(cls, value):
+        """Model output is free text: "Critical", " HIGH " and "moderate" all show up.
+
+        The merger counts and ranks by the five canonical names, so an unrecognised
+        spelling used to be listed but never counted, and a "Critical" finding could not
+        produce the do-not-merge verdict. Anything unknown becomes "medium".
+        """
+        if isinstance(value, str):
+            key = value.strip().lower()
+            if key in SEVERITIES:
+                return key
+            return _SEVERITY_ALIASES.get(key, "medium")
+        return "medium"
 
 
 # Fix proposed by the fix proposal agent

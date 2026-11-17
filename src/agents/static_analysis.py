@@ -3,7 +3,8 @@ import json
 from openai import AsyncOpenAI
 
 from src.agents.state import PRState, CodeIssue
-from src.agents.chunking import split_for_llm, shift_line
+from src.agents.chunking import split_for_llm
+from src.agents.llm_output import parse_llm_issues
 from src.core.config import get_settings
 from src.core.logging import get_logger
 from src.agents.security import calculate_llm_cost, strip_json_fence, FENCE
@@ -168,20 +169,21 @@ Return empty array [] if no issues found."""
             raw = response.choices[0].message.content or "[]"
             raw = strip_json_fence(raw)
 
-            llm_issues = json.loads(raw)
-            for issue in llm_issues:
-                issues.append(CodeIssue(
-                    agent="static_analysis",
-                    issue_type=issue.get("issue_type", "code_quality"),
-                    severity=issue.get("severity", "medium"),
-                    line_number=shift_line(issue.get("line_number"), offset),
-                    title=issue.get("title", "Code Quality Issue"),
-                    description=issue.get("description", ""),
-                    suggestion=issue.get("suggestion"),
-                ))
-
+            # The tokens were spent even if the reply turns out to be unusable.
             if response.usage:
                 cost += calculate_llm_cost(response.usage.prompt_tokens, response.usage.completion_tokens)
+
+            found, skipped = parse_llm_issues(
+                json.loads(raw),
+                agent="static_analysis",
+                default_type="code_quality",
+                default_severity="medium",
+                default_title="Code Quality Issue",
+                offset=offset,
+            )
+            issues.extend(found)
+            if skipped:
+                logger.warning("static_analysis_llm_entries_skipped", skipped=skipped, chunk_start_line=offset + 1)
 
         except Exception as e:
             logger.error("static_analysis_llm_failed", error=str(e), chunk_start_line=offset + 1)
