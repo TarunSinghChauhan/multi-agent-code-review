@@ -101,6 +101,7 @@ async def static_analysis_agent(state: PRState) -> dict:
     """
     logger.info("static_analysis_agent_started", job_id=state["job_id"])
     issues: list[CodeIssue] = []
+    warnings: list[str] = []
     cost = 0.0
 
     # 1. AST analysis (free)
@@ -187,6 +188,11 @@ Return empty array [] if no issues found."""
 
         except Exception as e:
             logger.error("static_analysis_llm_failed", error=str(e), chunk_start_line=offset + 1)
+            # Not the error text itself: it can carry provider details.
+            warnings.append(
+                f"static_analysis: LLM analysis failed for the part of the file starting at line {offset + 1}; "
+                "findings for that part are missing"
+            )
 
     logger.info("static_analysis_agent_done", job_id=state["job_id"], issues_found=len(issues), cost=cost)
-    return {"issues": issues, "total_cost_usd": state["total_cost_usd"] + cost}
+    return {"issues": issues, "total_cost_usd": state["total_cost_usd"] + cost, "warnings": warnings}

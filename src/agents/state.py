@@ -1,4 +1,4 @@
-from typing import TypedDict, Annotated
+from typing import TypedDict, Annotated, NotRequired
 from pydantic import BaseModel, field_validator
 import operator
 
@@ -70,3 +70,7 @@ class PRState(TypedDict):
     review_summary: str
     severity_counts: dict[str, int]
     completed: bool
+
+    # Things that could not be checked (an agent crashed, an LLM call failed). A review
+    # with warnings is incomplete, so "no issues found" must not be read as "clean".
+    warnings: NotRequired[list[str]]
