@@ -95,6 +95,7 @@ def serialize_result(final_state: dict) -> dict:
         elif isinstance(prop, dict):
             proposals.append(prop)
 
+    warnings = list(final_state.get("warnings") or [])
     return {
         "job_id": final_state.get("job_id"),
         "filename": final_state.get("filename"),
@@ -104,6 +105,8 @@ def serialize_result(final_state: dict) -> dict:
         "severity_counts": final_state.get("severity_counts", {}),
         "total_cost_usd": round(final_state.get("total_cost_usd", 0.0), 6),
         "review_summary": final_state.get("review_summary", ""),
+        "complete": not warnings,
+        "warnings": warnings,
         "issues": issues,
         "fix_proposals": proposals,
     }

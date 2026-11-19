@@ -51,6 +51,7 @@ def merger_agent(state: PRState) -> dict:
     total = len(sorted_issues)
     critical = severity_counts["critical"]
     high = severity_counts["high"]
+    warnings = list(state.get("warnings") or [])
 
     if critical > 0:
         verdict = "🔴 CRITICAL ISSUES FOUND — Do not merge"
@@ -58,6 +59,8 @@ def merger_agent(state: PRState) -> dict:
         verdict = "🟡 HIGH SEVERITY ISSUES — Review required before merge"
     elif total > 0:
         verdict = "🟢 MINOR ISSUES — Consider fixing before merge"
+    elif warnings:
+        verdict = "⚠️ INCOMPLETE REVIEW — Some checks did not finish, so \"no issues\" cannot be trusted"
     else:
         verdict = "✅ LGTM — No significant issues found"
 
@@ -79,6 +82,12 @@ def merger_agent(state: PRState) -> dict:
                 line_ref = f" (line {issue.line_number})" if issue.line_number else ""
                 summary_lines.append(f"- [{issue.severity.upper()}]{line_ref} {issue.title}: {issue.description}")
 
+    if warnings:
+        summary_lines.append("\n### ⚠️ Incomplete review")
+        summary_lines.append("Some parts of the review could not be completed, so findings may be missing:")
+        for warning in warnings:
+            summary_lines.append(f"- {warning}")
+
     if state["fix_proposals"]:
         summary_lines.append(f"\n### Fix Proposals ({len(state['fix_proposals'])} generated)")
         for fix in state["fix_proposals"]:
@@ -99,4 +108,5 @@ def merger_agent(state: PRState) -> dict:
         "review_summary": review_summary,
         "severity_counts": severity_counts,
         "completed": True,
+        "warnings": warnings,
     }

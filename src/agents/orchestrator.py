@@ -30,12 +30,18 @@ async def _run_parallel_agents(state: PRState) -> dict:
         return_exceptions=True,
     )
 
-    merged = {"issues": [], "total_cost_usd": state["total_cost_usd"]}
-    for result in results:
+    merged = {
+        "issues": [],
+        "total_cost_usd": state["total_cost_usd"],
+        "warnings": list(state.get("warnings") or []),
+    }
+    for name, result in zip(("static_analysis", "security"), results):
         if isinstance(result, Exception):
-            logger.error("agent_failed", error=str(result))
+            logger.error("agent_failed", agent=name, error=str(result))
+            merged["warnings"].append(f"{name}: agent crashed; none of its findings are included")
             continue
         merged["issues"].extend(result.get("issues", []))
+        merged["warnings"].extend(result.get("warnings", []))
         merged["total_cost_usd"] += result.get("total_cost_usd", 0) - state["total_cost_usd"]
 
     return merged
@@ -101,6 +107,7 @@ class CodeReviewOrchestrator:
             "review_summary": "",
             "severity_counts": {},
             "completed": False,
+            "warnings": [],
         }
 
         try:

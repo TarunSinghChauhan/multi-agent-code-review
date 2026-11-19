@@ -180,6 +180,7 @@ async def security_agent(state: PRState) -> dict:
     """
     logger.info("security_agent_started", job_id=state["job_id"])
     issues: list[CodeIssue] = []
+    warnings: list[str] = []
     cost = 0.0
 
     # 1. Pattern scan (free)
@@ -258,6 +259,11 @@ Return [] if no additional security issues found beyond obvious ones."""
 
         except Exception as e:
             logger.error("security_agent_llm_failed", error=str(e), chunk_start_line=offset + 1)
+            # Not the error text itself: it can carry provider details.
+            warnings.append(
+                f"security: LLM analysis failed for the part of the file starting at line {offset + 1}; "
+                "findings for that part are missing"
+            )
 
     logger.info("security_agent_done", job_id=state["job_id"], issues_found=len(issues), cost=cost)
-    return {"issues": issues, "total_cost_usd": state["total_cost_usd"] + cost}
+    return {"issues": issues, "total_cost_usd": state["total_cost_usd"] + cost, "warnings": warnings}
