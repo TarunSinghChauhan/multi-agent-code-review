@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.agents.orchestrator import CodeReviewOrchestrator
 from src.core.database import AsyncSessionLocal, ReviewJob
@@ -113,9 +113,22 @@ def serialize_result(final_state: dict) -> dict:
 
 
 class ReviewRequest(BaseModel):
-    filename: str = Field(default="code.py", max_length=100)
+    # The filename is pasted into the LLM prompts and into the markdown summary header, so it
+    # may only hold plain filename characters. Before, a name containing a newline could add
+    # its own instructions to the prompt (or its own markdown to the summary).
+    filename: str = Field(default="code.py", min_length=1, max_length=100, pattern=r"^[\w.\- ]+$")
     language: str = Field(default="python", pattern="^python$")
     code: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+
+    @field_validator("code")
+    @classmethod
+    def _code_has_content(cls, value: str) -> str:
+        # Whitespace-only code passed min_length and cost a full review (and a slot in the
+        # daily quota). Not stripped otherwise: removing leading blank lines would shift every
+        # reported line number.
+        if not value.strip():
+            raise ValueError("code must contain more than whitespace")
+        return value
 
 
 async def _save_job(job_id: str, request: ReviewRequest, result: dict) -> None:
@@ -193,8 +206,12 @@ async def get_status(job_id: str):
 async def get_results(job_id: str):
     if job_id not in _job_status:
         raise HTTPException(status_code=404, detail="Job not found")
-    if _job_status[job_id] != "completed":
-        raise HTTPException(status_code=202, detail=f"Job status: {_job_status[job_id]}")
+    status = _job_status[job_id]
+    if status.startswith("failed"):
+        # Not 202: that tells a client to keep polling, and a failed job never completes.
+        raise HTTPException(status_code=500, detail=f"Job {status}")
+    if status != "completed":
+        raise HTTPException(status_code=202, detail=f"Job status: {status}")
     return JSONResponse(content=_job_results[job_id])
 
 
